@@ -62,18 +62,20 @@ if __name__ == "__main__":
     # add a row to each data item that represents a unique id
     def make_map_fn(split):
         def process_fn(example, idx):
-            question = example.pop("problem")
-
-            question = question + " " + instruction_following
-
+            raw_question = example.pop("problem")
+            question = raw_question + " " + instruction_following
             answer = example.pop("solution")
             solution = extract_solution(answer)
+            level = example.pop("level")
+            type = example.pop("type")
+            if level == "Level 1":
+                return None
             data = {
                 "data_source": data_source,
                 "prompt": [{"role": "user", "content": question}],
                 "ability": "math",
                 "reward_model": {"style": "rule", "ground_truth": solution},
-                "extra_info": {"split": split, "index": idx},
+                "extra_info": {"split": split, "index": idx, "question": raw_question, "teacher_cots": [answer], "level": level, "type": type},
             }
             return data
 

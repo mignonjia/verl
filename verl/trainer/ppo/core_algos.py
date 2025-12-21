@@ -105,6 +105,7 @@ class AdvantageEstimator(str, Enum):
     GPG = "gpg"
     RLOO_VECTORIZED = "rloo_vectorized"
     GRPO_VECTORIZED = "grpo_vectorized"
+    HAPO = "hapo"
 
 
 ADV_ESTIMATOR_REGISTRY: dict[str, Any] = {}
@@ -751,6 +752,56 @@ def compute_rloo_vectorized_outcome_advantage(
         adv = adv.unsqueeze(-1) * response_mask
 
     return adv, adv
+
+
+@register_adv_est(AdvantageEstimator.HAPO)
+def compute_hapo_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    base_logprobs: torch.Tensor,
+    hindsight_logprobs: torch.Tensor,
+    config: Optional[AlgoConfig] = None,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Compute token-level HAPO advantages:
+
+        A_t = log p_hind(y_t | s_t, c) - log p_base(y_t | s_t)
+
+    Both `base_logprobs` and `hindsight_logprobs` are expected to be log-probabilities
+    with shape (bs, response_length). The returned advantages are detached so that
+    no gradients flow through the advantage computation itself.
+
+    Args:
+        token_level_rewards: (torch.Tensor)
+            Unused in the computation, kept for API compatibility. Shape (bs, response_length).
+        response_mask: (torch.Tensor)
+            Mask for valid response tokens. Shape (bs, response_length).
+        base_logprobs: (torch.Tensor)
+            Base policy log-probabilities, typically from rollout / old policy.
+        hindsight_logprobs: (torch.Tensor)
+            Hindsight log-probabilities computed with teacher CoTs.
+        config: (AlgoConfig, optional)
+            Unused, kept for API compatibility.
+
+    Returns:
+        advantages: (torch.Tensor)
+            HAPO advantages, shape (bs, response_length).
+        returns: (torch.Tensor)
+            For API compatibility; we simply mirror `advantages`.
+    """
+    del token_level_rewards, config  # unused, kept for signature compatibility
+    # print("hindsight_logprobs", hindsight_logprobs.shape)
+    # print("base_logprobs", base_logprobs.shape)
+    # print("response_mask", response_mask.shape)
+    with torch.no_grad():
+        advantages = (hindsight_logprobs - base_logprobs) * response_mask
+        advantages = advantages.detach()
+        returns = advantages
+
+    # add clipping
+    advantages = torch.clamp(advantages, min=-8.0, max=8.0)
+    return advantages, returns
 
 
 def compute_rewards(token_level_scores, old_log_prob, ref_log_prob, kl_ratio):

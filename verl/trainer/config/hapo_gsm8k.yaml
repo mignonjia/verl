@@ -1,0 +1,46 @@
+defaults:
+  - /trainer/ppo_trainer@_here_  # start from an existing PPO config as a base
+
+algorithm:
+  adv_estimator: hapo         # Use HAPO advantage
+  gamma: 1.0
+  lam: 1.0
+  num_teachers: 3             # Average over 3 teacher CoTs
+  use_kl_in_reward: false
+
+data:
+  train_files: ???
+  val_files: ???
+  prompt_key: prompt
+  return_full_prompt: true
+  shuffle: true
+  dataloader_num_workers: 4
+  # Optional: use the explicit HAPO dataset wrapper
+  # custom_cls:
+  #   path: verl.hapo.data
+  #   name: HAPODataset
+
+  # Key used by the default reward manager when no custom loop is provided
+  reward_fn_key: "reward"
+
+actor_rollout_ref:
+  model:
+    path: Qwen/Qwen2.5-7B-Instruct
+  rollout:
+    n: 8                      # 8 rollouts per question
+    temperature: 0.7
+
+trainer:
+  save_logs: true
+  log_dir: hapo_logs
+
+reward_model:
+  enable: false               # We use a rule-based reward instead of RM
+  # Hook up the HAPO GSM8K reward via the custom reward function mechanism
+  custom_reward_function:
+    path: verl.hapo.reward_fn
+    name: hapo_gsm8k_reward
+    reward_kwargs:
+      # Passed through to the reward_fn via `reward.py`
+      # The trainer will inject the tokenizer into batch.meta_info["tokenizer"].
+      pass_tokenizer: true

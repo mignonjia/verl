@@ -62,6 +62,7 @@ from verl.utils.rollout_skip import RolloutSkip
 from verl.utils.seqlen_balancing import calculate_workload, get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
+from verl.utils.model import compute_position_id_with_mask
 from verl.workers.config import FSDPEngineConfig
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
 
@@ -256,6 +257,11 @@ def compute_advantage(
             adv_kwargs["index"] = data.non_tensor_batch["uid"]
         if "reward_baselines" in data.batch:  # optional
             adv_kwargs["reward_baselines"] = data.batch["reward_baselines"]
+        # Optional inputs used by some estimators (e.g., HAPO)
+        if "old_log_probs" in data.batch:
+            adv_kwargs["base_logprobs"] = data.batch["old_log_probs"]
+        if "hindsight_logprobs" in data.batch:
+            adv_kwargs["hindsight_logprobs"] = data.batch["hindsight_logprobs"]
 
         # calculate advantage estimator
         advantages, returns = adv_estimator_fn(**adv_kwargs)
@@ -1111,9 +1117,135 @@ class RayPPOTrainer:
             old_log_prob = tu.get_tensordict({"old_log_probs": log_probs.float(), "entropys": entropy.float()})
             old_log_prob = DataProto.from_tensordict(old_log_prob)
         else:
+            if self.config.trainer.hapo_debug:
+                torch.save(batch.to_tensordict(), "/home/hal-mingjiahuo/hapo/batch.pt")
             old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
+            if self.config.trainer.hapo_debug:
+                torch.save(old_log_prob.to_tensordict(), "/home/hal-mingjiahuo/hapo/old_log_prob.pt")
             old_log_prob_mfu = 0
         return old_log_prob, old_log_prob_mfu
+
+    def _build_hindsight_prompt(self, question: str, teacher_cot: str) -> str:
+        """
+        Construct the hindsight prompt for critic evaluation using the tokenizer's chat template.
+        """
+        user_content = (
+            f"Here is an example problem with one of its solution:\n\n"
+            f"Example Problem: {question}\n\n"
+            f"Example Solution:\n{teacher_cot}\n\n"
+            f"The solution is the correct one. You should rethink the problem in your own words when you solve it.\n"
+            f"Problem: {question}"
+        )
+        messages = [
+            {
+                "role": "system",
+                "content": "You are a helpful assistant.",
+            },
+            {
+                "role": "user",
+                "content": user_content,
+            },
+        ]
+        return self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+
+    def _compute_hindsight_logprobs(self, batch: DataProto, timing_raw: dict) -> DataProto:
+        """
+        Compute hindsight log-probabilities p_hind for each response token, using teacher CoTs.
+
+        This is a pure prefill operation:
+          - Build hindsight prompts from (question, teacher_cot)
+          - Concatenate with student responses
+          - Run a single forward pass to obtain log-probs
+        """
+        if self.config.algorithm.adv_estimator != AdvantageEstimator.HAPO:
+            return batch
+
+        # print(batch.batch.keys())
+        # print(batch.non_tensor_batch.keys())
+        # print(batch.non_tensor_batch.get("raw_prompt"))
+        # exit()
+
+        responses = batch.batch["responses"]  # (bs, resp_len)
+        response_mask = batch.batch["response_mask"]  # (bs, resp_len)
+
+        bs, resp_len = responses.shape
+        device = responses.device
+
+        num_teachers = self.config.algorithm.get("num_teachers", 1)
+
+        # Pre-allocate accumulator for hindsight logprobs
+        hindsight_accum = torch.zeros_like(responses, dtype=torch.float32, device=device)
+
+        with marked_timer("hindsight_logprobs", timing_raw, color="magenta"):
+            for t_idx in range(num_teachers):
+                # Build tokenized hindsight prompts for the whole batch
+                teacher_prompt_str_list = []
+
+                for i in range(bs):
+                    teacher_cots = batch.non_tensor_batch.get("extra_info")[i].get("teacher_cots")
+                    # print(batch.non_tensor_batch.get("raw_prompt")[i])
+                    question = batch.non_tensor_batch.get("raw_prompt")[i][0].get("content")
+                    teacher_cot = teacher_cots[min(t_idx, len(teacher_cots) - 1)]
+
+                    prompt_str = self._build_hindsight_prompt(str(question), str(teacher_cot))
+                    teacher_prompt_str_list.append(prompt_str)
+
+                # Batch encode teacher prompts with LEFT padding
+                prompt_enc = self.tokenizer(
+                    teacher_prompt_str_list,
+                    return_tensors="pt",
+                    add_special_tokens=False,
+                    padding=True,  # pad to max prompt length within this batch
+                    padding_side="left",
+                    return_attention_mask=True,
+                )
+
+                prompt_input_ids = prompt_enc["input_ids"]  # (bs, prompt_max_len)
+                prompt_attention_mask = prompt_enc["attention_mask"]  # (bs, prompt_max_len)
+
+                # Ensure prompt tensors are on the same device as `responses`
+                prompt_input_ids = prompt_input_ids.to(device)
+                prompt_attention_mask = prompt_attention_mask.to(device)
+
+                prompt_max_len = prompt_input_ids.shape[1]
+
+                input_ids = torch.cat([prompt_input_ids, responses], dim=1)  # (bs, prompt_max_len + resp_len)
+                attention_mask = torch.cat([prompt_attention_mask, response_mask], dim=1)  # (bs, prompt_max_len + resp_len)
+
+                position_ids = compute_position_id_with_mask(attention_mask)
+
+                # Build DataProto for log-prob computation
+                teacher_batch = DataProto.from_single_dict(
+                    {
+                        "input_ids": input_ids,
+                        "attention_mask": attention_mask,
+                        "position_ids": position_ids,
+                        "responses": responses,
+                        "responses_mask": response_mask,
+                    }
+                )
+
+                # Compute log-probs with the actor worker (prefill only)
+                teacher_batch.meta_info["temperature"] = self.config.trainer.hindsight_log_prob_temp
+                if self.config.trainer.hapo_debug:
+                    torch.save(teacher_batch.to_tensordict(), "/home/hal-mingjiahuo/hapo/teacher_batch.pt")
+                teacher_logprob = self.actor_rollout_wg.compute_log_prob(teacher_batch)
+                if self.config.trainer.hapo_debug:
+                    torch.save(teacher_logprob.to_tensordict(), "/home/hal-mingjiahuo/hapo/teacher_logprob.pt")
+                teacher_old_logprobs = teacher_logprob.batch["old_log_probs"].to(device)  # (bs, resp_len)
+
+                # `teacher_old_logprobs` is already aligned to `responses` (shape: [bs, resp_len]).
+                # Downstream code uses `response_mask` heavily (KL penalty, rollout correction, advantage, loss),
+                # so keep everything in response-shape here and simply mask out padded response tokens.
+
+                hindsight_lp = teacher_old_logprobs.to(torch.float32) * response_mask.to(torch.float32)
+                hindsight_accum += hindsight_lp
+
+            # Average over teachers
+            hindsight_logprobs = hindsight_accum / float(num_teachers)
+            batch.batch["hindsight_logprobs"] = hindsight_logprobs
+
+        return batch
 
     def _update_actor(self, batch: DataProto) -> DataProto:
         rollout_config = self.config.actor_rollout_ref.rollout
@@ -1251,6 +1383,8 @@ class RayPPOTrainer:
                     )
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
                 batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
+                # Make tokenizer available downstream (e.g. for custom HAPO reward functions)
+                batch.meta_info["tokenizer"] = self.tokenizer
 
                 # add uid to batch
                 batch.non_tensor_batch["uid"] = np.array(
@@ -1358,7 +1492,11 @@ class RayPPOTrainer:
                         )
                     else:  # Recompute old_log_probs
                         with marked_timer("old_log_prob", timing_raw, color="blue"):
+                            if "old_log_prob_temp" in self.config.trainer:
+                                batch.meta_info["temperature"] = self.config.trainer.old_log_prob_temp
                             old_log_prob, old_log_prob_mfu = self._compute_old_log_prob(batch)
+                            if "old_log_prob_temp" in self.config.trainer:
+                                batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
                             entropys = old_log_prob.batch["entropys"]
                             response_masks = batch.batch["response_mask"]
                             actor_config = self.config.actor_rollout_ref.actor
@@ -1405,6 +1543,14 @@ class RayPPOTrainer:
                         if reward_extra_infos_dict:
                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
 
+                        # Optional: materialize an `is_correct` tensor if provided by the reward fn
+                        if "is_correct" in reward_extra_infos_dict:
+                            batch.batch["is_correct"] = torch.as_tensor(
+                                reward_extra_infos_dict["is_correct"],
+                                dtype=torch.bool,
+                                device=reward_tensor.device,
+                            )
+
                         # compute rewards. apply_kl_penalty if available
                         if self.config.algorithm.use_kl_in_reward:
                             batch, kl_metrics = apply_kl_penalty(
@@ -1428,6 +1574,14 @@ class RayPPOTrainer:
                             batch, is_metrics = compute_rollout_correction_and_add_to_batch(batch, rollout_corr_config)
                             # IS and off-policy metrics already have rollout_corr/ prefix
                             metrics.update(is_metrics)
+
+                        # Compute hindsight logprobs for HAPO (if enabled)
+                        batch = self._compute_hindsight_logprobs(batch, timing_raw)
+
+                        # For logging: remember how many rollouts per question we used
+                        metrics["actor_rollouts_per_question"] = int(
+                            self.config.actor_rollout_ref.rollout.get("n", 1)
+                        )
 
                         # compute advantages, executed on the driver process
                         norm_adv_by_std_in_grpo = self.config.algorithm.get(
@@ -1534,6 +1688,32 @@ class RayPPOTrainer:
 
                 # TODO: make a canonical logger that supports various backend
                 logger.log(data=metrics, step=self.global_steps)
+
+                # Optional: save rich HAPO logs for later visualization
+                # flag_save_logs = self.config.trainer.get("save_logs", False)
+                # print("flag_save_logs", flag_save_logs)
+                # hapo_log_dir = self.config.trainer.get("hapo_log_dir", "hapo_logs")
+                # print("hapo_log_dir", hapo_log_dir)
+                # flag_save_logs = True
+                # hapo_log_dir = "/home/hal-mingjiahuo/hapo/advantage_logs"
+                if (
+                    self.config.trainer.get("save_logs", False)
+                    and self.config.algorithm.adv_estimator == AdvantageEstimator.HAPO
+                ):
+                    try:
+                        from verl.hapo.logging import save_hapo_step
+
+                        save_hapo_step(
+                            step=self.global_steps,
+                            batch=batch,
+                            metrics=metrics,
+                            log_dir=self.config.trainer.get("hapo_log_dir", "hapo_logs")
+                        )
+                    except Exception as e:  # noqa: PERF203
+                        print(f"[HAPO logging] Failed to save logs at step {self.global_steps}: {e}")
+
+                if self.config.trainer.hapo_debug:
+                    exit()
 
                 progress_bar.update(1)
                 self.global_steps += 1
