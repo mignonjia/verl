@@ -112,6 +112,7 @@ class RLHFDataset(Dataset):
         self.truncation = config.get("truncation", "error")
         self.filter_overlong_prompts = config.get("filter_overlong_prompts", True)
         self.apply_chat_template_kwargs = config.get("apply_chat_template_kwargs", {})
+        print("apply_chat_template_kwargs", self.apply_chat_template_kwargs)
 
         self.tool_config_path = config.get("tool_config_path", None)
         self.tool_schemas = None

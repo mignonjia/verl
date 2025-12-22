@@ -800,7 +800,7 @@ def compute_hapo_advantage(
         returns = advantages
 
     # add clipping
-    advantages = torch.clamp(advantages, min=-8.0, max=8.0)
+    advantages = torch.clamp(advantages, min=-2.0, max=2.0)
     return advantages, returns
 
 

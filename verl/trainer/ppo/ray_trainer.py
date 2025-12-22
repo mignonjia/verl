@@ -333,6 +333,9 @@ class RayPPOTrainer:
 
         self.role_worker_mapping = role_worker_mapping
         self.resource_pool_manager = resource_pool_manager
+        # print(f"role_worker_mapping: {self.role_worker_mapping}")
+        # print(f"fix_teacher: {self.config.trainer.get('fix_teacher', False)}")
+        # exit()
         self.use_reference_policy = need_reference_policy(self.role_worker_mapping)
         # legacy reward model implementation
         self.use_rm = need_reward_model(self.role_worker_mapping)
@@ -1118,10 +1121,10 @@ class RayPPOTrainer:
             old_log_prob = DataProto.from_tensordict(old_log_prob)
         else:
             if self.config.trainer.hapo_debug:
-                torch.save(batch.to_tensordict(), "/home/hal-mingjiahuo/hapo/batch.pt")
+                torch.save(batch.to_tensordict(), "/home/hal-mingjiahuo/hapo/tensor/batch.pt")
             old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
             if self.config.trainer.hapo_debug:
-                torch.save(old_log_prob.to_tensordict(), "/home/hal-mingjiahuo/hapo/old_log_prob.pt")
+                torch.save(old_log_prob.to_tensordict(), "/home/hal-mingjiahuo/hapo/tensor/old_log_prob.pt")
             old_log_prob_mfu = 0
         return old_log_prob, old_log_prob_mfu
 
@@ -1148,7 +1151,7 @@ class RayPPOTrainer:
         ]
         return self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
 
-    def _compute_hindsight_logprobs(self, batch: DataProto, timing_raw: dict) -> DataProto:
+    def _compute_hindsight_logprobs(self, batch: DataProto, timing_raw: dict, fix_teacher: bool = False) -> DataProto:
         """
         Compute hindsight log-probabilities p_hind for each response token, using teacher CoTs.
 
@@ -1228,11 +1231,17 @@ class RayPPOTrainer:
                 # Compute log-probs with the actor worker (prefill only)
                 teacher_batch.meta_info["temperature"] = self.config.trainer.hindsight_log_prob_temp
                 if self.config.trainer.hapo_debug:
-                    torch.save(teacher_batch.to_tensordict(), "/home/hal-mingjiahuo/hapo/teacher_batch.pt")
-                teacher_logprob = self.actor_rollout_wg.compute_log_prob(teacher_batch)
+                    torch.save(teacher_batch.to_tensordict(), "/home/hal-mingjiahuo/hapo/tensor/teacher_batch.pt")
+                
+                if not fix_teacher:
+                    teacher_logprob = self.actor_rollout_wg.compute_log_prob(teacher_batch)
+                    teacher_old_logprobs = teacher_logprob.batch["old_log_probs"].to(device)  # (bs, resp_len)
+                else:
+                    teacher_logprob = self._compute_ref_log_prob(teacher_batch)
+                    teacher_old_logprobs = teacher_logprob.batch["ref_log_prob"].to(device)  # (bs, resp_len)
+
                 if self.config.trainer.hapo_debug:
-                    torch.save(teacher_logprob.to_tensordict(), "/home/hal-mingjiahuo/hapo/teacher_logprob.pt")
-                teacher_old_logprobs = teacher_logprob.batch["old_log_probs"].to(device)  # (bs, resp_len)
+                    torch.save(teacher_logprob.to_tensordict(), "/home/hal-mingjiahuo/hapo/tensor/teacher_logprob.pt")
 
                 # `teacher_old_logprobs` is already aligned to `responses` (shape: [bs, resp_len]).
                 # Downstream code uses `response_mask` heavily (KL penalty, rollout correction, advantage, loss),
@@ -1576,7 +1585,7 @@ class RayPPOTrainer:
                             metrics.update(is_metrics)
 
                         # Compute hindsight logprobs for HAPO (if enabled)
-                        batch = self._compute_hindsight_logprobs(batch, timing_raw)
+                        batch = self._compute_hindsight_logprobs(batch, timing_raw, fix_teacher=self.config.trainer.get("fix_teacher", False))
 
                         # For logging: remember how many rollouts per question we used
                         metrics["actor_rollouts_per_question"] = int(

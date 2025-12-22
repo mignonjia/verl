@@ -31,7 +31,7 @@ HAPO_LOG_DIR=$HOME/hapo/advantage_logs
 
 
 python3 -m verl.trainer.main_ppo \
-    algorithm.adv_estimator=hapo \
+    algorithm.adv_estimator=gae \
     data.train_files="$train_files" \
     data.val_files="$test_files" \
     data.train_batch_size=256 \
@@ -39,7 +39,8 @@ python3 -m verl.trainer.main_ppo \
     data.max_response_length=2048 \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
-    actor_rollout_ref.model.path=Qwen/Qwen2.5-7B-Instruct \
+    +data.apply_chat_template_kwargs.enable_thinking=False \
+    actor_rollout_ref.model.path=Qwen/Qwen3-8B \
     actor_rollout_ref.model.enable_gradient_checkpointing=False \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
@@ -54,28 +55,26 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.tensor_model_parallel_size=4 \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
-    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=4 \
     critic.optim.lr=1e-5 \
     critic.model.use_remove_padding=True \
-    critic.model.path=Qwen/Qwen2.5-7B-Instruct \
+    critic.model.path=Qwen/Qwen3-8B \
     critic.model.enable_gradient_checkpointing=False \
     critic.ppo_micro_batch_size_per_gpu=4 \
     critic.model.fsdp_config.param_offload=False \
     critic.model.fsdp_config.optimizer_offload=False \
     algorithm.use_kl_in_reward=False \
-    trainer.val_only=False \
+    trainer.val_only=True \
     trainer.val_before_train=True \
     +trainer.save_logs=False \
     +trainer.hapo_log_dir="$HAPO_LOG_DIR" \
     +trainer.old_log_prob_temp=1.0 \
     +trainer.hindsight_log_prob_temp=1.0 \
     +trainer.hapo_debug=False \
-    +trainer.fix_teacher=True \
     trainer.critic_warmup=0 \
     trainer.rollout_data_dir="$ROLLOUT_DATA_DIR" \
     trainer.logger='["console","wandb"]' \
     trainer.project_name='verl_example' \
-    trainer.experiment_name='Qwen2.5-7B-hapo-fix-teacher' \
+    trainer.experiment_name='Qwen2.5-7B-Base-val-only' \
     trainer.n_gpus_per_node=4 \
     trainer.nnodes=1 \
     trainer.save_freq=-1 \

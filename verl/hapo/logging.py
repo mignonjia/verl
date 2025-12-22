@@ -29,6 +29,7 @@ def save_hapo_step(
         }
     """
     os.makedirs(log_dir, exist_ok=True)
+    questions=batch.non_tensor_batch.get("raw_prompt")
     responses = batch.batch["responses"]  # (bs, resp_len)
     base_logprobs = batch.batch["old_log_probs"]
     hindsight_logprobs = batch.batch.get("hindsight_logprobs")
@@ -88,6 +89,7 @@ def save_hapo_step(
         rollouts.append(
             {
                 "rollout_id": rollout_id,
+                "question": questions[i][0].get("content"),
                 "question_id": qid,
                 "is_correct": bool(is_correct_tensor[i]) if is_correct_tensor is not None else None,
                 "tokens": tokens,
@@ -115,6 +117,6 @@ def save_hapo_step(
         },
     }
 
-    filename = os.path.join(log_dir, f"{step:08d}.jsonl")
+    filename = os.path.join(log_dir, f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl")
     with open(filename, "w", encoding="utf-8") as f:
         f.write(json.dumps(payload, ensure_ascii=False) + "\n")
