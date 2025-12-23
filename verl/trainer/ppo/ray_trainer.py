@@ -253,6 +253,7 @@ def compute_advantage(
             "response_mask": data.batch["response_mask"],
             "config": config,
         }
+        # exit()
         if "uid" in data.non_tensor_batch:  # optional
             adv_kwargs["index"] = data.non_tensor_batch["uid"]
         if "reward_baselines" in data.batch:  # optional
@@ -260,8 +261,17 @@ def compute_advantage(
         # Optional inputs used by some estimators (e.g., HAPO)
         if "old_log_probs" in data.batch:
             adv_kwargs["base_logprobs"] = data.batch["old_log_probs"]
-        if "hindsight_logprobs" in data.batch:
-            adv_kwargs["hindsight_logprobs"] = data.batch["hindsight_logprobs"]
+        if "critic_logprobs" in data.batch:
+            adv_kwargs["critic_logprobs"] = data.batch["critic_logprobs"]
+        
+        if "old_topk_token_ids" in data.batch:
+            adv_kwargs["actor_topk_token_ids"] = data.batch["old_topk_token_ids"]
+        if "old_topk_log_probs" in data.batch:
+            adv_kwargs["actor_topk_log_probs"] = data.batch["old_topk_log_probs"]
+        if "critic_topk_token_ids" in data.batch:
+            adv_kwargs["critic_topk_token_ids"] = data.batch["critic_topk_token_ids"]
+        if "critic_topk_log_probs" in data.batch:
+            adv_kwargs["critic_topk_log_probs"] = data.batch["critic_topk_log_probs"]
 
         # calculate advantage estimator
         advantages, returns = adv_estimator_fn(**adv_kwargs)
@@ -1128,9 +1138,9 @@ class RayPPOTrainer:
             old_log_prob_mfu = 0
         return old_log_prob, old_log_prob_mfu
 
-    def _build_hindsight_prompt(self, question: str, teacher_cot: str) -> str:
+    def _build_critic_prompt(self, question: str, teacher_cot: str) -> str:
         """
-        Construct the hindsight prompt for critic evaluation using the tokenizer's chat template.
+        Construct the critic prompt for critic evaluation using the tokenizer's chat template.
         """
         user_content = (
             f"Here is an example problem with one of its solution:\n\n"
@@ -1151,23 +1161,18 @@ class RayPPOTrainer:
         ]
         return self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
 
-    def _compute_hindsight_logprobs(self, batch: DataProto, timing_raw: dict, fix_teacher: bool = False) -> DataProto:
+    def _compute_critic_logprobs(self, batch: DataProto, timing_raw: dict, fix_teacher: bool = False) -> DataProto:
         """
-        Compute hindsight log-probabilities p_hind for each response token, using teacher CoTs.
+        Compute critic log-probabilities p_critic for each response token, using teacher CoTs.
 
         This is a pure prefill operation:
-          - Build hindsight prompts from (question, teacher_cot)
+          - Build critic prompts from (question, teacher_cot)
           - Concatenate with student responses
           - Run a single forward pass to obtain log-probs
         """
         if self.config.algorithm.adv_estimator != AdvantageEstimator.HAPO:
             return batch
-
-        # print(batch.batch.keys())
-        # print(batch.non_tensor_batch.keys())
-        # print(batch.non_tensor_batch.get("raw_prompt"))
-        # exit()
-
+        
         responses = batch.batch["responses"]  # (bs, resp_len)
         response_mask = batch.batch["response_mask"]  # (bs, resp_len)
 
@@ -1176,12 +1181,12 @@ class RayPPOTrainer:
 
         num_teachers = self.config.algorithm.get("num_teachers", 1)
 
-        # Pre-allocate accumulator for hindsight logprobs
-        hindsight_accum = torch.zeros_like(responses, dtype=torch.float32, device=device)
+        # Pre-allocate accumulator for critic logprobs
+        critic_accum = torch.zeros_like(responses, dtype=torch.float32, device=device)
 
-        with marked_timer("hindsight_logprobs", timing_raw, color="magenta"):
+        with marked_timer("critic_logprobs", timing_raw, color="magenta"):
             for t_idx in range(num_teachers):
-                # Build tokenized hindsight prompts for the whole batch
+                # Build tokenized critic prompts for the whole batch
                 teacher_prompt_str_list = []
 
                 for i in range(bs):
@@ -1190,7 +1195,7 @@ class RayPPOTrainer:
                     question = batch.non_tensor_batch.get("raw_prompt")[i][0].get("content")
                     teacher_cot = teacher_cots[min(t_idx, len(teacher_cots) - 1)]
 
-                    prompt_str = self._build_hindsight_prompt(str(question), str(teacher_cot))
+                    prompt_str = self._build_critic_prompt(str(question), str(teacher_cot))
                     teacher_prompt_str_list.append(prompt_str)
 
                 # Batch encode teacher prompts with LEFT padding
@@ -1229,30 +1234,38 @@ class RayPPOTrainer:
                 )
 
                 # Compute log-probs with the actor worker (prefill only)
-                teacher_batch.meta_info["temperature"] = self.config.trainer.hindsight_log_prob_temp
+                teacher_batch.meta_info["temperature"] = self.config.trainer.critic_log_prob_temp
                 if self.config.trainer.hapo_debug:
                     torch.save(teacher_batch.to_tensordict(), "/home/hal-mingjiahuo/hapo/tensor/teacher_batch.pt")
                 
                 if not fix_teacher:
                     teacher_logprob = self.actor_rollout_wg.compute_log_prob(teacher_batch)
-                    teacher_old_logprobs = teacher_logprob.batch["old_log_probs"].to(device)  # (bs, resp_len)
+                    teacher_old_logprobs = teacher_logprob.batch["old_log_probs"].to(device)
                 else:
                     teacher_logprob = self._compute_ref_log_prob(teacher_batch)
                     teacher_old_logprobs = teacher_logprob.batch["ref_log_prob"].to(device)  # (bs, resp_len)
+                
+                critic_lp = teacher_old_logprobs.to(torch.float32) * response_mask.to(torch.float32)
 
-                if self.config.trainer.hapo_debug:
+                # save critic topk token ids and log probs
+                # IMPORTANT: assume num_teachers = 1 for now
+                if not fix_teacher:
+                    if "old_topk_token_ids" in teacher_logprob.batch and "old_topk_log_probs" in teacher_logprob.batch:
+                        batch.batch["critic_topk_token_ids"] = teacher_logprob.batch["old_topk_token_ids"].to(device)
+                        batch.batch["critic_topk_log_probs"] = teacher_logprob.batch["old_topk_log_probs"].to(device)
+                else:
+                    if "ref_topk_token_ids" in teacher_logprob.batch and "ref_topk_log_probs" in teacher_logprob.batch:
+                        batch.batch["critic_topk_token_ids"] = teacher_logprob.batch["ref_topk_token_ids"].to(device)
+                        batch.batch["critic_topk_log_probs"] = teacher_logprob.batch["ref_topk_log_probs"].to(device)
+
+                if self.config.trainer.hapo_debug:  
                     torch.save(teacher_logprob.to_tensordict(), "/home/hal-mingjiahuo/hapo/tensor/teacher_logprob.pt")
 
-                # `teacher_old_logprobs` is already aligned to `responses` (shape: [bs, resp_len]).
-                # Downstream code uses `response_mask` heavily (KL penalty, rollout correction, advantage, loss),
-                # so keep everything in response-shape here and simply mask out padded response tokens.
-
-                hindsight_lp = teacher_old_logprobs.to(torch.float32) * response_mask.to(torch.float32)
-                hindsight_accum += hindsight_lp
+                critic_accum += critic_lp
 
             # Average over teachers
-            hindsight_logprobs = hindsight_accum / float(num_teachers)
-            batch.batch["hindsight_logprobs"] = hindsight_logprobs
+            critic_logprobs = critic_accum / float(num_teachers)
+            batch.batch["critic_logprobs"] = critic_logprobs
 
         return batch
 
@@ -1522,6 +1535,8 @@ class RayPPOTrainer:
                             metrics.update(old_log_prob_metrics)
                             old_log_prob.batch.pop("entropys")
                             batch = batch.union(old_log_prob)
+                            print('[DEBUG] old_log_prob.batch.keys()', old_log_prob.batch.keys())
+                            # exit()
                             if "rollout_log_probs" in batch.batch.keys():
                                 # TODO: we may want to add diff of probs too.
                                 from verl.utils.debug.metrics import calculate_debug_metrics
@@ -1584,8 +1599,8 @@ class RayPPOTrainer:
                             # IS and off-policy metrics already have rollout_corr/ prefix
                             metrics.update(is_metrics)
 
-                        # Compute hindsight logprobs for HAPO (if enabled)
-                        batch = self._compute_hindsight_logprobs(batch, timing_raw, fix_teacher=self.config.trainer.get("fix_teacher", False))
+                        # Compute critic logprobs for HAPO (if enabled)
+                        batch = self._compute_critic_logprobs(batch, timing_raw, fix_teacher=self.config.trainer.get("fix_teacher", False))
 
                         # For logging: remember how many rollouts per question we used
                         metrics["actor_rollouts_per_question"] = int(

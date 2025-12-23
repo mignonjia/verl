@@ -29,6 +29,7 @@ VAL_DATA_PATH=$HOME/data/verl_validation
 ROLLOUT_DATA_DIR=$HOME/data/rollout_data
 HAPO_LOG_DIR=$HOME/hapo/advantage_logs
 
+MODEL_PATH=Qwen/Qwen2.5-7B-Instruct
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=hapo \
@@ -39,7 +40,7 @@ python3 -m verl.trainer.main_ppo \
     data.max_response_length=2048 \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
-    actor_rollout_ref.model.path=Qwen/Qwen2.5-7B-Instruct \
+    actor_rollout_ref.model.path=$MODEL_PATH \
     actor_rollout_ref.model.enable_gradient_checkpointing=False \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
@@ -54,10 +55,11 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.tensor_model_parallel_size=4 \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
+    +actor_rollout_ref.rollout.hapo_kl_topk=20 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=4 \
     critic.optim.lr=1e-5 \
     critic.model.use_remove_padding=True \
-    critic.model.path=Qwen/Qwen2.5-7B-Instruct \
+    critic.model.path=$MODEL_PATH \
     critic.model.enable_gradient_checkpointing=False \
     critic.ppo_micro_batch_size_per_gpu=4 \
     critic.model.fsdp_config.param_offload=False \
@@ -68,14 +70,14 @@ python3 -m verl.trainer.main_ppo \
     +trainer.save_logs=False \
     +trainer.hapo_log_dir="$HAPO_LOG_DIR" \
     +trainer.old_log_prob_temp=1.0 \
-    +trainer.hindsight_log_prob_temp=1.0 \
+    +trainer.critic_log_prob_temp=1.0 \
     +trainer.hapo_debug=False \
-    +trainer.fix_teacher=True \
+    +trainer.fix_teacher=False \
     trainer.critic_warmup=0 \
     trainer.rollout_data_dir="$ROLLOUT_DATA_DIR" \
     trainer.logger='["console","wandb"]' \
     trainer.project_name='verl_example' \
-    trainer.experiment_name='Qwen2.5-7B-hapo-fix-teacher' \
+    trainer.experiment_name='7B-Instruct-hapo' \
     trainer.n_gpus_per_node=4 \
     trainer.nnodes=1 \
     trainer.save_freq=-1 \

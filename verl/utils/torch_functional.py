@@ -92,6 +92,35 @@ def logprobs_from_logits(logits, labels, inplace_backward=True):
     return output
 
 
+def topk_logprobs_from_logits(logits: torch.Tensor, k: int):
+    """
+    Compute top-k token ids and their log-probabilities from logits.
+
+    Args:
+        logits (Tensor): shape (..., vocab_size)
+        k (int): number of top tokens to return per position
+
+    Returns:
+        Tuple[Tensor, Tensor]:
+            - topk_log_probs: shape (..., k), float32
+            - topk_token_ids: shape (..., k), int64
+    """
+    if k is None:
+        raise ValueError("k must be an integer >= 1, got None")
+    k = int(k)
+    if k < 1:
+        raise ValueError(f"k must be >= 1, got {k}")
+
+    vocab_size = logits.size(-1)
+    k = min(k, vocab_size)
+
+    # top-k ordering is preserved under log-softmax since it subtracts a per-position constant.
+    topk_logits, topk_token_ids = torch.topk(logits, k, dim=-1)
+    log_z = torch.logsumexp(logits.to(torch.float32), dim=-1, keepdim=True)
+    topk_log_probs = topk_logits.to(torch.float32) - log_z
+    return topk_log_probs, topk_token_ids
+
+
 def logprobs_from_logits_flash_attn(logits, labels, inplace_backward=True):
     output = cross_entropy_loss(logits, labels, inplace_backward=inplace_backward)
     assert isinstance(output, tuple), (

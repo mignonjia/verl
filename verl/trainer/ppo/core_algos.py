@@ -753,14 +753,90 @@ def compute_rloo_vectorized_outcome_advantage(
 
     return adv, adv
 
+def compute_kl_divergence_topk(
+    actor_token_ids: torch.Tensor,
+    actor_log_probs: torch.Tensor,
+    critic_token_ids: torch.Tensor,
+    critic_log_probs: torch.Tensor,
+    epsilon: float = 1e-10,
+) -> torch.Tensor:
+    """
+    Compute KL divergence KL(actor || critic) using top-K tokens.
+
+    KL(P||Q) = sum_x P(x) * log(P(x)/Q(x))
+
+    Args:
+        actor_token_ids: (torch.Tensor)
+            Actor's top-K token IDs. Shape (bs, response_length, top_k)
+        actor_log_probs: (torch.Tensor)
+            Actor's top-K log probabilities. Shape (bs, response_length, top_k)
+        critic_token_ids: (torch.Tensor)
+            Critic's top-K token IDs. Shape (bs, response_length, top_k)
+        critic_log_probs: (torch.Tensor)
+            Critic's top-K log probabilities. Shape (bs, response_length, top_k)
+
+    Returns:
+        Per-sequence KL divergence estimate (lower bound, as we only use top-K),
+        computed by averaging the per-token KL over the response length.
+        Shape: (bs,)
+
+    Note:
+        If actor's token is not in critic's top-K, we use epsilon=1e-10,
+        which contributes large KL value (~23 nats), correctly reflecting
+        significant distribution mismatch.
+    """
+    # Defensive handling for empty / missing inputs.
+    if (
+        actor_token_ids is None
+        or actor_log_probs is None
+        or critic_token_ids is None
+        or critic_log_probs is None
+        or actor_token_ids.numel() == 0
+        or critic_token_ids.numel() == 0
+    ):
+        device = actor_log_probs.device if isinstance(actor_log_probs, torch.Tensor) else None
+        return torch.tensor(0.0, device=device)
+
+    # Shapes:
+    # - actor_token_ids/log_probs:  (bs, response_length, Ka)
+    # - critic_token_ids/log_probs: (bs, response_length, Kc)
+    assert actor_token_ids.shape == actor_log_probs.shape, "actor_token_ids and actor_log_probs must have same shape"
+    assert critic_token_ids.shape == critic_log_probs.shape, "critic_token_ids and critic_log_probs must have same shape"
+    assert actor_token_ids.shape[:2] == critic_token_ids.shape[:2], "actor/critic must share (bs, response_length)"
+
+    # Vectorized match: for each actor top-k token, find its log-prob under critic (if present in critic top-k).
+    # match: (bs, response_length, Ka, Kc)
+    match = actor_token_ids.unsqueeze(-1) == critic_token_ids.unsqueeze(-2)
+    # masked_critic_logps: (bs, response_length, Ka, Kc) where non-matches are -inf
+    masked_critic_logps = critic_log_probs.unsqueeze(-2).masked_fill(~match, -float("inf"))
+    # If a token appears in critic top-k, logsumexp picks its (single) matched log-prob; otherwise returns -inf.
+    critic_log_prob_for_actor = torch.logsumexp(masked_critic_logps, dim=-1)  # (bs, response_length, Ka)
+
+    log_eps = torch.tensor(epsilon, device=critic_log_prob_for_actor.device, dtype=critic_log_prob_for_actor.dtype).log()
+    critic_log_prob_for_actor = torch.where(
+        torch.isfinite(critic_log_prob_for_actor),
+        critic_log_prob_for_actor,
+        log_eps,
+    )
+
+    # KL(actor || critic) on the (truncated) support given by actor's top-k:
+    #   sum_i p_a(i) * (log p_a(i) - log p_c(i))
+    # where p_a(i) = exp(actor_log_probs[i]).
+    actor_probs = actor_log_probs.exp()
+    kl_per_token = (actor_probs * (actor_log_probs - critic_log_prob_for_actor)).sum(dim=-1)
+    return kl_per_token
 
 @register_adv_est(AdvantageEstimator.HAPO)
 def compute_hapo_advantage(
     token_level_rewards: torch.Tensor,
     response_mask: torch.Tensor,
     base_logprobs: torch.Tensor,
-    hindsight_logprobs: torch.Tensor,
+    critic_logprobs: torch.Tensor,
     config: Optional[AlgoConfig] = None,
+    actor_topk_token_ids: torch.Tensor = None,
+    actor_topk_log_probs: torch.Tensor = None,
+    critic_topk_token_ids: torch.Tensor = None,
+    critic_topk_log_probs: torch.Tensor = None,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
@@ -768,7 +844,7 @@ def compute_hapo_advantage(
 
         A_t = log p_hind(y_t | s_t, c) - log p_base(y_t | s_t)
 
-    Both `base_logprobs` and `hindsight_logprobs` are expected to be log-probabilities
+    Both `base_logprobs` and `critic_logprobs` are expected to be log-probabilities
     with shape (bs, response_length). The returned advantages are detached so that
     no gradients flow through the advantage computation itself.
 
@@ -779,7 +855,7 @@ def compute_hapo_advantage(
             Mask for valid response tokens. Shape (bs, response_length).
         base_logprobs: (torch.Tensor)
             Base policy log-probabilities, typically from rollout / old policy.
-        hindsight_logprobs: (torch.Tensor)
+        critic_logprobs: (torch.Tensor)
             Hindsight log-probabilities computed with teacher CoTs.
         config: (AlgoConfig, optional)
             Unused, kept for API compatibility.
@@ -791,16 +867,35 @@ def compute_hapo_advantage(
             For API compatibility; we simply mirror `advantages`.
     """
     del token_level_rewards, config  # unused, kept for signature compatibility
-    # print("hindsight_logprobs", hindsight_logprobs.shape)
+    # print("critic_logprobs", critic_logprobs.shape)
     # print("base_logprobs", base_logprobs.shape)
     # print("response_mask", response_mask.shape)
+    # print("[compute_hapo_advantage] actor_topk_token_ids", actor_topk_token_ids)
+    # exit()
     with torch.no_grad():
-        advantages = (hindsight_logprobs - base_logprobs) * response_mask
-        advantages = advantages.detach()
+        advantages = (critic_logprobs - base_logprobs) * response_mask
+
+        if (
+            actor_topk_token_ids is not None
+            and actor_topk_log_probs is not None
+            and critic_topk_token_ids is not None
+            and critic_topk_log_probs is not None
+        ):
+            # compute_kl_divergence_topk returns per-sequence KL: (bs,sequence_length)
+            kl_per_token = compute_kl_divergence_topk(
+                actor_topk_token_ids,
+                actor_topk_log_probs,
+                critic_topk_token_ids,
+                critic_topk_log_probs,
+            )
+            advantages = (advantages + kl_per_token) * response_mask
+
+        # Add clipping for stability.
+        advantages = torch.clamp(advantages, min=-2.0, max=2.0)
+
+        # For API compatibility; mirror advantages before clipping.
         returns = advantages
 
-    # add clipping
-    advantages = torch.clamp(advantages, min=-2.0, max=2.0)
     return advantages, returns
 
 

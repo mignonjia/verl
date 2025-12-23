@@ -14,6 +14,9 @@
 
 import unittest
 
+import os
+import tempfile
+
 import torch
 import torch.nn as nn
 from tensordict import TensorDict
@@ -58,9 +61,22 @@ class TestDataParallelPPOActor(unittest.TestCase):
     def setUpClass(cls):
         """Set up distributed environment"""
         if not torch.distributed.is_initialized():
-            torch.distributed.init_process_group(
-                backend="nccl" if torch.cuda.is_available() else "gloo", init_method="env://"
-            )
+            backend = "nccl" if torch.cuda.is_available() else "gloo"
+            # If launched via torchrun, env:// rendezvous works. Under plain pytest, fall back to a
+            # single-process file:// rendezvous to avoid requiring RANK/WORLD_SIZE.
+            if os.environ.get("RANK") is not None and os.environ.get("WORLD_SIZE") is not None:
+                torch.distributed.init_process_group(backend=backend, init_method="env://")
+                cls._dist_init_file = None
+            else:
+                tmp = tempfile.NamedTemporaryFile(prefix="verl-dist-", delete=False)
+                tmp.close()
+                cls._dist_init_file = tmp.name
+                torch.distributed.init_process_group(
+                    backend=backend,
+                    init_method=f"file://{cls._dist_init_file}",
+                    rank=0,
+                    world_size=1,
+                )
 
         cls.rank = torch.distributed.get_rank()
         cls.world_size = torch.distributed.get_world_size()
@@ -100,6 +116,12 @@ class TestDataParallelPPOActor(unittest.TestCase):
         """Clean up distributed environment"""
         if torch.distributed.is_initialized():
             torch.distributed.destroy_process_group()
+        init_file = getattr(cls, "_dist_init_file", None)
+        if init_file:
+            try:
+                os.remove(init_file)
+            except OSError:
+                pass
 
     def _create_test_data_for_compute_log_prob(self):
         """Create test DataProto for compute_log_prob method"""
@@ -193,6 +215,36 @@ class TestDataParallelPPOActor(unittest.TestCase):
         self.assertTrue(torch.all(torch.isfinite(log_probs)))
 
         self.assertIsNone(entropies)
+
+    def test_compute_log_prob_topk(self):
+        """Test compute_log_prob method with top-k output"""
+        data = self._create_test_data_for_compute_log_prob()
+        data.meta_info["log_prob_top_k"] = 5
+
+        log_probs, entropies, topk_token_ids, topk_log_probs = self.actor.compute_log_prob(
+            data, calculate_entropy=False
+        )
+
+        batch_size = data.batch["responses"].shape[0]
+        response_length = data.batch["responses"].shape[1]
+        top_k = data.meta_info["log_prob_top_k"]
+
+        self.assertIsInstance(log_probs, torch.Tensor)
+        self.assertEqual(log_probs.shape, (batch_size, response_length))
+        self.assertTrue(torch.all(torch.isfinite(log_probs)))
+
+        self.assertIsNone(entropies)
+
+        self.assertIsInstance(topk_token_ids, torch.Tensor)
+        self.assertEqual(topk_token_ids.shape, (batch_size, response_length, top_k))
+        self.assertTrue(torch.all(topk_token_ids >= 0))
+
+        self.assertIsInstance(topk_log_probs, torch.Tensor)
+        self.assertEqual(topk_log_probs.shape, (batch_size, response_length, top_k))
+        self.assertTrue(torch.all(torch.isfinite(topk_log_probs)))
+
+        # topk() should return log_probs in descending order per position
+        self.assertTrue(torch.all(topk_log_probs[..., :-1] >= topk_log_probs[..., 1:]))
 
     def test_update_policy(self):
         """Test update_policy method"""

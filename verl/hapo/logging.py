@@ -32,7 +32,7 @@ def save_hapo_step(
     questions=batch.non_tensor_batch.get("raw_prompt")
     responses = batch.batch["responses"]  # (bs, resp_len)
     base_logprobs = batch.batch["old_log_probs"]
-    hindsight_logprobs = batch.batch.get("hindsight_logprobs")
+    critic_logprobs = batch.batch.get("critic_logprobs")
     advantages = batch.batch.get("advantages")
     response_mask = batch.batch["response_mask"]
 
@@ -65,7 +65,7 @@ def save_hapo_step(
         mask = response_mask[i].bool()
         token_ids = responses[i][mask].tolist()
         base_lp = base_logprobs[i][mask].tolist()
-        hind_lp = hindsight_logprobs[i][mask].tolist() if hindsight_logprobs is not None else None
+        hind_lp = critic_logprobs[i][mask].tolist() if critic_logprobs is not None else None
         adv = advantages[i][mask].tolist() if advantages is not None else None
 
         # Create per-token entries
@@ -76,7 +76,7 @@ def save_hapo_step(
                 "token_id": int(token_id),
                 "decoded_id": decoded_token,
                 "old_log_prob": float(base_lp[j]) if j < len(base_lp) else None,
-                "hindsight_prob": float(hind_lp[j]) if hind_lp is not None and j < len(hind_lp) else None,
+                "critic_prob": float(hind_lp[j]) if hind_lp is not None and j < len(hind_lp) else None,
                 "advantage": float(adv[j]) if adv is not None and j < len(adv) else None,
             }
             tokens.append(token_entry)

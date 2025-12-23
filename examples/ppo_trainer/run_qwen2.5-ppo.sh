@@ -12,9 +12,11 @@ gsm8k_train_path=$HOME/data/gsm8k/train.parquet
 gsm8k_test_path=$HOME/data/gsm8k/test.parquet
 math_train_path=$HOME/data/math/train.parquet
 math_test_path=$HOME/data/math/test.parquet
+math_cot_eval_test_path=$HOME/data/math_cot_eval/test.parquet
 deepscaler_train_path=$HOME/data/deepscaler/train.parquet
 deepscaler_test_path=$HOME/data/deepscaler/test.parquet
 math_50_test_path=$HOME/data/math-50-difficult/test.parquet
+math_500_test_path=$HOME/data/math-500/test.parquet
 
 # train_files="['$gsm8k_train_path', '$math_train_path']"
 # test_files="['$gsm8k_test_path', '$math_test_path']"
@@ -23,12 +25,15 @@ math_50_test_path=$HOME/data/math-50-difficult/test.parquet
 # test_files="['$deepscaler_test_path']"
 
 train_files="['$math_train_path']"
-test_files="['$math_test_path']"
+test_files="['$math_test_path', '$math_cot_eval_test_path']"
 
 VAL_DATA_PATH=$HOME/data/verl_validation
 ROLLOUT_DATA_DIR=$HOME/data/rollout_data
 HAPO_LOG_DIR=$HOME/hapo/advantage_logs
 
+MODEL=Qwen/Qwen2.5-14B-Instruct
+
+#    +data.apply_chat_template_kwargs.enable_thinking=False \
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=gae \
@@ -39,8 +44,7 @@ python3 -m verl.trainer.main_ppo \
     data.max_response_length=2048 \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
-    +data.apply_chat_template_kwargs.enable_thinking=False \
-    actor_rollout_ref.model.path=Qwen/Qwen3-8B \
+    actor_rollout_ref.model.path=$MODEL \
     actor_rollout_ref.model.enable_gradient_checkpointing=False \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
@@ -57,7 +61,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
     critic.optim.lr=1e-5 \
     critic.model.use_remove_padding=True \
-    critic.model.path=Qwen/Qwen3-8B \
+    critic.model.path=$MODEL \
     critic.model.enable_gradient_checkpointing=False \
     critic.ppo_micro_batch_size_per_gpu=4 \
     critic.model.fsdp_config.param_offload=False \
@@ -74,7 +78,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.rollout_data_dir="$ROLLOUT_DATA_DIR" \
     trainer.logger='["console","wandb"]' \
     trainer.project_name='verl_example' \
-    trainer.experiment_name='Qwen2.5-7B-Base-val-only' \
+    trainer.experiment_name='14B-Instruct-with-cot-val-only' \
     trainer.n_gpus_per_node=4 \
     trainer.nnodes=1 \
     trainer.save_freq=-1 \

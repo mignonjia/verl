@@ -163,6 +163,9 @@ class RolloutConfig(BaseConfig):
     log_prob_use_dynamic_bsz: bool = False
     log_prob_max_token_len_per_gpu: int = 16384
 
+    # Top-k log-probs used by HAPO KL / diagnostics (1 means "top-1 only", i.e. current behavior).
+    hapo_kl_topk: int = 1
+
     disable_log_stats: bool = True
 
     multi_stage_wake_up: bool = False
@@ -227,3 +230,6 @@ class RolloutConfig(BaseConfig):
                 raise NotImplementedError(
                     f"Current rollout {self.name=} not implemented pipeline_model_parallel_size > 1 yet."
                 )
+
+        if self.hapo_kl_topk < 1:
+            raise ValueError("`hapo_kl_topk` must be >= 1.")

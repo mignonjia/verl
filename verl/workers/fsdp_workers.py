@@ -975,14 +975,31 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         data.meta_info["max_token_len"] = self.config.rollout.log_prob_max_token_len_per_gpu
         data.meta_info["use_dynamic_bsz"] = self.config.rollout.log_prob_use_dynamic_bsz
         data.meta_info["temperature"] = self.config.rollout.temperature
+        data.meta_info["log_prob_top_k"] = int(self.config.rollout.get("hapo_kl_topk", 1))
         # perform recompute log_prob
         with self.ulysses_sharding_manager:
             with adapter_ctx:
-                output, entropys = self.actor.compute_log_prob(data=data, calculate_entropy=True)
-            output = DataProto.from_dict(
-                tensors={"old_log_probs": output, "entropys": entropys},
-                meta_info={"temperature": self.config.rollout.temperature},
-            )
+                res = self.actor.compute_log_prob(data=data, calculate_entropy=True)
+            if isinstance(res, tuple) and len(res) == 4:
+                output, entropys, topk_token_ids, topk_log_probs = res
+                output = DataProto.from_dict(
+                    tensors={
+                        "old_log_probs": output,
+                        "entropys": entropys,
+                        "old_topk_token_ids": topk_token_ids,
+                        "old_topk_log_probs": topk_log_probs,
+                    },
+                    meta_info={
+                        "temperature": self.config.rollout.temperature,
+                        "log_prob_top_k": int(self.config.rollout.get("hapo_kl_topk", 1)),
+                    },
+                )
+            else:
+                output, entropys = res
+                output = DataProto.from_dict(
+                    tensors={"old_log_probs": output, "entropys": entropys},
+                    meta_info={"temperature": self.config.rollout.temperature},
+                )
 
         output = output.to("cpu")
 
@@ -1016,10 +1033,23 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         data.meta_info["temperature"] = self.config.rollout.temperature
         data.meta_info["max_token_len"] = self.config.ref.log_prob_max_token_len_per_gpu
         data.meta_info["use_dynamic_bsz"] = self.config.ref.log_prob_use_dynamic_bsz
+        data.meta_info["log_prob_top_k"] = int(self.config.rollout.get("hapo_kl_topk", 1))
         with self.ulysses_sharding_manager:
             data = data.to("cpu")  # data will to device with each micro batch on ref.compute_log_prob
-            output, _ = self.ref_policy.compute_log_prob(data=data, calculate_entropy=False)
-            output = DataProto.from_dict(tensors={"ref_log_prob": output})
+            res = self.ref_policy.compute_log_prob(data=data, calculate_entropy=False)
+            if isinstance(res, tuple) and len(res) == 4:
+                output, _, topk_token_ids, topk_log_probs = res
+                output = DataProto.from_dict(
+                    tensors={
+                        "ref_log_prob": output,
+                        "ref_topk_token_ids": topk_token_ids,
+                        "ref_topk_log_probs": topk_log_probs,
+                    },
+                    meta_info={"log_prob_top_k": int(self.config.rollout.get("hapo_kl_topk", 1))},
+                )
+            else:
+                output, _ = res
+                output = DataProto.from_dict(tensors={"ref_log_prob": output})
 
         output = output.to("cpu")
 
