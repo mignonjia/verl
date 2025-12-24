@@ -1130,10 +1130,10 @@ class RayPPOTrainer:
             old_log_prob = tu.get_tensordict({"old_log_probs": log_probs.float(), "entropys": entropy.float()})
             old_log_prob = DataProto.from_tensordict(old_log_prob)
         else:
-            if self.config.trainer.hapo_debug:
+            if "hapo_debug" in self.config.trainer and self.config.trainer.hapo_debug:
                 torch.save(batch.to_tensordict(), "/home/hal-mingjiahuo/hapo/tensor/batch.pt")
             old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
-            if self.config.trainer.hapo_debug:
+            if "hapo_debug" in self.config.trainer and self.config.trainer.hapo_debug:
                 torch.save(old_log_prob.to_tensordict(), "/home/hal-mingjiahuo/hapo/tensor/old_log_prob.pt")
             old_log_prob_mfu = 0
         return old_log_prob, old_log_prob_mfu
@@ -1235,7 +1235,7 @@ class RayPPOTrainer:
 
                 # Compute log-probs with the actor worker (prefill only)
                 teacher_batch.meta_info["temperature"] = self.config.trainer.critic_log_prob_temp
-                if self.config.trainer.hapo_debug:
+                if "hapo_debug" in self.config.trainer and self.config.trainer.hapo_debug:
                     torch.save(teacher_batch.to_tensordict(), "/home/hal-mingjiahuo/hapo/tensor/teacher_batch.pt")
                 
                 if not fix_teacher:
@@ -1258,7 +1258,7 @@ class RayPPOTrainer:
                         batch.batch["critic_topk_token_ids"] = teacher_logprob.batch["ref_topk_token_ids"].to(device)
                         batch.batch["critic_topk_log_probs"] = teacher_logprob.batch["ref_topk_log_probs"].to(device)
 
-                if self.config.trainer.hapo_debug:  
+                if "hapo_debug" in self.config.trainer and self.config.trainer.hapo_debug:  
                     torch.save(teacher_logprob.to_tensordict(), "/home/hal-mingjiahuo/hapo/tensor/teacher_logprob.pt")
 
                 critic_accum += critic_lp
@@ -1535,7 +1535,7 @@ class RayPPOTrainer:
                             metrics.update(old_log_prob_metrics)
                             old_log_prob.batch.pop("entropys")
                             batch = batch.union(old_log_prob)
-                            print('[DEBUG] old_log_prob.batch.keys()', old_log_prob.batch.keys())
+                            # print('[DEBUG] old_log_prob.batch.keys()', old_log_prob.batch.keys())
                             # exit()
                             if "rollout_log_probs" in batch.batch.keys():
                                 # TODO: we may want to add diff of probs too.
@@ -1736,7 +1736,7 @@ class RayPPOTrainer:
                     except Exception as e:  # noqa: PERF203
                         print(f"[HAPO logging] Failed to save logs at step {self.global_steps}: {e}")
 
-                if self.config.trainer.hapo_debug:
+                if "hapo_debug" in self.config.trainer and self.config.trainer.hapo_debug:
                     exit()
 
                 progress_bar.update(1)

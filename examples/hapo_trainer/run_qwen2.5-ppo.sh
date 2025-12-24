@@ -31,7 +31,8 @@ VAL_DATA_PATH=$HOME/data/verl_validation
 ROLLOUT_DATA_DIR=$HOME/data/rollout_data
 HAPO_LOG_DIR=$HOME/hapo/advantage_logs
 
-MODEL=Qwen/Qwen2.5-14B-Instruct
+MODEL=Qwen/Qwen3-8B-Base
+
 
 #    +data.apply_chat_template_kwargs.enable_thinking=False \
 
@@ -67,7 +68,7 @@ python3 -m verl.trainer.main_ppo \
     critic.model.fsdp_config.param_offload=False \
     critic.model.fsdp_config.optimizer_offload=False \
     algorithm.use_kl_in_reward=False \
-    trainer.val_only=True \
+    trainer.val_only=False \
     trainer.val_before_train=True \
     +trainer.save_logs=False \
     +trainer.hapo_log_dir="$HAPO_LOG_DIR" \
@@ -78,7 +79,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.rollout_data_dir="$ROLLOUT_DATA_DIR" \
     trainer.logger='["console","wandb"]' \
     trainer.project_name='verl_example' \
-    trainer.experiment_name='14B-Instruct-with-cot-val-only' \
+    trainer.experiment_name='Qwen3-8B-Base-with-cot-val-only' \
     trainer.n_gpus_per_node=4 \
     trainer.nnodes=1 \
     trainer.save_freq=-1 \

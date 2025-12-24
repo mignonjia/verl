@@ -122,6 +122,7 @@ ENV/
 
 # data
 *.parquet
+!data/**/*.parquet
 
 
 # local logs
